@@ -33,6 +33,9 @@ members = [
   "examples/resources/src-tauri",
   "examples/api/src-tauri",
   "examples/api/src-tauri/tauri-plugin-sample",
+
+  # app-example
+  "app-example/screen-test/src-tauri",
 ]
 resolver = "2"
 
