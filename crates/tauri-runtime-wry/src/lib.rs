@@ -692,6 +692,74 @@ impl From<Position> for PositionWrapper {
   }
 }
 
+#[cfg(desktop)]
+fn monitor_contains_position(
+  monitor_pos: TaoPhysicalPosition<i32>,
+  monitor_size: TaoPhysicalSize<u32>,
+  window_position: TaoPhysicalPosition<i32>,
+) -> bool {
+  monitor_pos.x <= window_position.x
+    && window_position.x < monitor_pos.x + monitor_size.width as i32
+    && monitor_pos.y <= window_position.y
+    && window_position.y < monitor_pos.y + monitor_size.height as i32
+}
+
+#[cfg(desktop)]
+fn monitor_matches_window_position(
+  window_position: &TaoPosition,
+  monitor_pos: TaoPhysicalPosition<i32>,
+  monitor_size: TaoPhysicalSize<u32>,
+  monitor_scale_factor: f64,
+) -> bool {
+  let window_position = window_position.to_physical::<i32>(monitor_scale_factor);
+
+  monitor_contains_position(monitor_pos, monitor_size, window_position)
+}
+
+#[cfg(desktop)]
+fn find_monitor_for_position<I>(
+  mut monitors: I,
+  window_position: &TaoPosition,
+) -> Option<MonitorHandle>
+where
+  I: Iterator<Item = MonitorHandle>,
+{
+  monitors.find(|monitor| {
+    monitor_matches_window_position(
+      window_position,
+      monitor.position(),
+      monitor.size(),
+      monitor.scale_factor(),
+    )
+  })
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[cfg(desktop)]
+  #[test]
+  fn monitor_match_uses_candidate_monitor_scale_factor() {
+    let window_position = TaoPosition::Logical(TaoLogicalPosition::new(1300.0, 100.0));
+    let monitor_pos = TaoPhysicalPosition::new(1280, 0);
+    let monitor_size = TaoPhysicalSize::new(1280, 720);
+
+    assert!(monitor_matches_window_position(
+      &window_position,
+      monitor_pos,
+      monitor_size,
+      1.5,
+    ));
+    assert!(!monitor_matches_window_position(
+      &window_position,
+      monitor_pos,
+      monitor_size,
+      2.0,
+    ));
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct UserAttentionTypeWrapper(pub TaoUserAttentionType);
 
@@ -4487,20 +4555,26 @@ fn create_window<T: UserEvent, F: Fn(RawWindow) + Send + 'static>(
   }
 
   #[cfg(desktop)]
+  {
+    if let (Some(window_position), Some(Fullscreen::Borderless(None))) = (
+      window_builder.inner.window.position.as_ref(),
+      window_builder.inner.window.fullscreen.as_ref(),
+    ) {
+      if let Some(monitor) =
+        find_monitor_for_position(event_loop.available_monitors(), window_position)
+      {
+        window_builder.inner = window_builder
+          .inner
+          .with_fullscreen(Some(Fullscreen::Borderless(Some(monitor))));
+      }
+    }
+
+  }
+
+  #[cfg(desktop)]
   if window_builder.prevent_overflow.is_some() || window_builder.center {
     let monitor = if let Some(window_position) = &window_builder.inner.window.position {
-      event_loop.available_monitors().find(|m| {
-        let monitor_pos = m.position();
-        let monitor_size = m.size();
-
-        // type annotations required for 32bit targets.
-        let window_position = window_position.to_physical::<i32>(m.scale_factor());
-
-        monitor_pos.x <= window_position.x
-          && window_position.x < monitor_pos.x + monitor_size.width as i32
-          && monitor_pos.y <= window_position.y
-          && window_position.y < monitor_pos.y + monitor_size.height as i32
-      })
+      find_monitor_for_position(event_loop.available_monitors(), window_position)
     } else {
       event_loop.primary_monitor()
     };
@@ -4567,11 +4641,19 @@ fn create_window<T: UserEvent, F: Fn(RawWindow) + Send + 'static>(
     }
   };
 
+  #[cfg(target_os = "macos")]
+  let initial_outer_position = window_builder.inner.window.position;
+
   let window = window_builder
     .inner
     .build(event_loop)
     .inspect_err(|e| log::error!("Error creating window: {e:?}"))
     .map_err(|_| Error::CreateWindow)?;
+
+  #[cfg(target_os = "macos")]
+  if let Some(position) = initial_outer_position {
+    window.set_outer_position(position);
+  }
 
   #[cfg(feature = "tracing")]
   {
