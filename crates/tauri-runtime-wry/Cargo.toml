@@ -63,9 +63,15 @@ default = ["x11", "dbus"]
 devtools = ["wry/devtools", "tauri-runtime/devtools"]
 x11 = ["tao/x11", "wry/x11"]
 macos-private-api = [
+  "macos-private-api-fullscreen",
+  "macos-private-api-transparent",
+]
+macos-private-api-fullscreen = [
   "wry/fullscreen",
+]
+macos-private-api-transparent = [
   "wry/transparent",
-  "tauri-runtime/macos-private-api",
+  "tauri-runtime/macos-private-api-transparent",
 ]
 # TODO: Remove in v3 - wry does not have this feature anymore
 objc-exception = []

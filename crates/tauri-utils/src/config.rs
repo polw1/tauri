@@ -2019,8 +2019,9 @@ pub struct WindowConfig {
   pub focusable: bool,
   /// Whether the window is transparent or not.
   ///
-  /// Note that on `macOS` this requires the `macos-private-api` feature flag, enabled under `tauri > macOSPrivateApi`.
-  /// WARNING: Using private APIs on `macOS` prevents your application from being accepted to the `App Store`.
+  /// Note that on `macOS` this requires the `macos-private-api-transparent` feature flag,
+  /// enabled under `app > macOS > privateApiTransparent` or `app > macOSPrivateApi`.
+  /// WARNING: Using private APIs on `macOS` may prevent your application from being accepted to the `App Store`.
   #[serde(default)]
   pub transparent: bool,
   /// Whether the window is maximized or not.
@@ -2997,6 +2998,24 @@ pub enum PatternKind {
   },
 }
 
+/// macOS private API configuration.
+#[derive(Debug, Default, PartialEq, Eq, Clone, Deserialize, Serialize)]
+#[cfg_attr(feature = "schema", derive(JsonSchema))]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppMacOsConfig {
+  /// Enables WKWebView's fullscreen API.
+  ///
+  /// This uses a private WebKit preference and may prevent App Store acceptance.
+  #[serde(default)]
+  pub private_api_fullscreen: bool,
+
+  /// Enables transparent WKWebView background support.
+  ///
+  /// This uses private WebKit behavior and may prevent App Store acceptance.
+  #[serde(default)]
+  pub private_api_transparent: bool,
+}
+
 /// The App configuration object.
 ///
 /// See more: <https://v2.tauri.app/reference/config/#appconfig>
@@ -3067,9 +3086,12 @@ pub struct AppConfig {
   /// Configuration for app tray icon.
   #[serde(alias = "tray-icon")]
   pub tray_icon: Option<TrayIconConfig>,
-  /// MacOS private API configuration. Enables the transparent background API and sets the `fullScreenEnabled` preference to `true`.
+  /// Legacy macOS private API configuration. Enables the transparent background API and sets the `fullScreenEnabled` preference to `true`.
   #[serde(rename = "macOSPrivateApi", alias = "macos-private-api", default)]
   pub macos_private_api: bool,
+  /// Granular macOS private API configuration.
+  #[serde(rename = "macOS", alias = "macos", default)]
+  pub macos: AppMacOsConfig,
   /// Whether we should inject the Tauri API on `window.__TAURI__` or not.
   #[serde(default, alias = "with-global-tauri")]
   pub with_global_tauri: bool,
@@ -3084,6 +3106,8 @@ impl AppConfig {
     vec![
       "tray-icon",
       "macos-private-api",
+      "macos-private-api-fullscreen",
+      "macos-private-api-transparent",
       "protocol-asset",
       "isolation",
     ]
@@ -3095,8 +3119,11 @@ impl AppConfig {
     if self.tray_icon.is_some() {
       features.push("tray-icon");
     }
-    if self.macos_private_api {
-      features.push("macos-private-api");
+    if self.macos_private_api || self.macos.private_api_fullscreen {
+      features.push("macos-private-api-fullscreen");
+    }
+    if self.macos_private_api || self.macos.private_api_transparent {
+      features.push("macos-private-api-transparent");
     }
     if self.security.asset_protocol.enable {
       features.push("protocol-asset");
@@ -4366,12 +4393,27 @@ mod build {
     }
   }
 
+  impl ToTokens for AppMacOsConfig {
+    fn to_tokens(&self, tokens: &mut TokenStream) {
+      let private_api_fullscreen = self.private_api_fullscreen;
+      let private_api_transparent = self.private_api_transparent;
+
+      literal_struct!(
+        tokens,
+        ::tauri::utils::config::AppMacOsConfig,
+        private_api_fullscreen,
+        private_api_transparent
+      );
+    }
+  }
+
   impl ToTokens for AppConfig {
     fn to_tokens(&self, tokens: &mut TokenStream) {
       let windows = vec_lit(&self.windows, identity);
       let security = &self.security;
       let tray_icon = opt_lit(self.tray_icon.as_ref());
       let macos_private_api = self.macos_private_api;
+      let macos = &self.macos;
       let with_global_tauri = self.with_global_tauri;
       let enable_gtk_app_id = self.enable_gtk_app_id;
 
@@ -4382,6 +4424,7 @@ mod build {
         security,
         tray_icon,
         macos_private_api,
+        macos,
         with_global_tauri,
         enable_gtk_app_id
       );
@@ -4437,6 +4480,7 @@ mod build {
 #[cfg(test)]
 mod test {
   use super::*;
+  use serde_json::json;
 
   // TODO: create a test that compares a config to a json config
 
@@ -4467,6 +4511,7 @@ mod test {
       },
       tray_icon: None,
       macos_private_api: false,
+      macos: Default::default(),
       with_global_tauri: false,
       enable_gtk_app_id: false,
     };
@@ -4514,6 +4559,49 @@ mod test {
     assert_eq!(b_config, build);
     assert_eq!(d_bundle, bundle);
     assert_eq!(d_windows, app.windows);
+  }
+
+  #[test]
+  fn legacy_macos_private_api_enables_granular_private_api_features() {
+    let config: AppConfig = serde_json::from_value(json!({
+      "macOSPrivateApi": true
+    }))
+    .unwrap();
+
+    assert_eq!(
+      config.features(),
+      vec![
+        "macos-private-api-fullscreen",
+        "macos-private-api-transparent"
+      ]
+    );
+  }
+
+  #[test]
+  fn macos_private_api_features_can_be_enabled_independently() {
+    let fullscreen_config: AppConfig = serde_json::from_value(json!({
+      "macOS": {
+        "privateApiFullscreen": true
+      }
+    }))
+    .unwrap();
+
+    assert_eq!(
+      fullscreen_config.features(),
+      vec!["macos-private-api-fullscreen"]
+    );
+
+    let transparent_config: AppConfig = serde_json::from_value(json!({
+      "macOS": {
+        "privateApiTransparent": true
+      }
+    }))
+    .unwrap();
+
+    assert_eq!(
+      transparent_config.features(),
+      vec!["macos-private-api-transparent"]
+    );
   }
 
   #[test]

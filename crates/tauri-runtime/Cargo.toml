@@ -69,4 +69,5 @@ objc2-web-kit = { version = "0.3", default-features = false, features = [
 
 [features]
 devtools = []
-macos-private-api = []
+macos-private-api = ["macos-private-api-transparent"]
+macos-private-api-transparent = []

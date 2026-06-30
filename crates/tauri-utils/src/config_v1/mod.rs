@@ -1001,7 +1001,7 @@ pub struct WindowConfig {
   /// Whether the window is transparent or not.
   ///
   /// Note that on `macOS` this requires the `macos-private-api` feature flag, enabled under `tauri > macOSPrivateApi`.
-  /// WARNING: Using private APIs on `macOS` prevents your application from being accepted to the `App Store`.
+  /// WARNING: Using private APIs on `macOS` may prevent your application from being accepted to the `App Store`.
   #[serde(default)]
   pub transparent: bool,
   /// Whether the window is maximized or not.
