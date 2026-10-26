@@ -31,13 +31,27 @@ impl<'a> SwiftArg<'a> for ChannelSendDataCallback {
   }
 }
 
+type ChannelReleaseCallbackFn = unsafe extern "C" fn(c_ulonglong);
+pub struct ChannelReleaseCallback(pub ChannelReleaseCallbackFn);
+
+impl<'a> SwiftArg<'a> for ChannelReleaseCallback {
+  type ArgType = ChannelReleaseCallbackFn;
+
+  unsafe fn as_arg(&'a self) -> Self::ArgType {
+    self.0
+  }
+}
+
 swift!(pub fn run_plugin_command(
   id: i32,
   name: &SRString,
   method: &SRString,
   data: &SRString,
+  channels: &SRString,
   callback: PluginMessageCallback,
-  send_channel_data_callback: ChannelSendDataCallback
+  send_channel_data_callback: ChannelSendDataCallback,
+  retain_channel_callback: ChannelReleaseCallback,
+  release_channel_callback: ChannelReleaseCallback
 ));
 swift!(pub fn register_plugin(
   name: &SRString,

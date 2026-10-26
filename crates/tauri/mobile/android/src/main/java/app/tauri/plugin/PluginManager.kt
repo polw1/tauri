@@ -186,7 +186,7 @@ object PluginManager {
   }
 
   @JniMethod
-  fun runCommand(id: Int, pluginId: String, command: String, data: String) {
+  fun runCommand(id: Int, pluginId: String, command: String, data: String, channels: String) {
     val successId = 0L
     val errorId = 1L
     val invoke = Invoke(id.toLong(), command, successId, errorId, { fn, result ->
@@ -199,6 +199,7 @@ object PluginManager {
       }
       handlePluginResponse(id, success, error)
     }, data, jsonMapper)
+    invoke.attachChannels(channels, { retainChannel(it) }, { releaseChannel(it) })
 
     dispatchPluginMessage(invoke, pluginId)
   }
@@ -237,6 +238,8 @@ object PluginManager {
 
   private external fun handlePluginResponse(id: Int, success: String?, error: String?)
   private external fun sendChannelData(id: Long, data: String)
+  private external fun retainChannel(id: Long)
+  private external fun releaseChannel(id: Long)
 }
 
 @InvokeArg

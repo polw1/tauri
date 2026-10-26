@@ -6,6 +6,22 @@ import Foundation
 
 let CHANNEL_PREFIX = "__CHANNEL__:"
 let channelDataKey = CodingUserInfoKey(rawValue: "sendChannelData")!
+let channelLifetimesKey = CodingUserInfoKey(rawValue: "channelLifetimes")!
+
+final class ChannelLifetime {
+  let token: UInt64
+  private let release: (UInt64) -> Void
+
+  init(token: UInt64, retain: (UInt64) -> Void, release: @escaping (UInt64) -> Void) {
+    self.token = token
+    self.release = release
+    retain(token)
+  }
+
+  deinit {
+    release(token)
+  }
+}
 
 public class Channel: Decodable {
   public let id: UInt64
@@ -38,7 +54,16 @@ public class Channel: Decodable {
     }
 
     self.id = channelId
-    self.handler = handler
+    if let lifetimes = decoder.userInfo[channelLifetimesKey] as? [UInt64: ChannelLifetime] {
+      guard let lifetime = lifetimes[channelId] else {
+        throw DecodingError.dataCorruptedError(in: container, debugDescription: "channel has no registration")
+      }
+      self.handler = { _, data in
+        withExtendedLifetime(lifetime) { handler(lifetime.token, data) }
+      }
+    } else {
+      self.handler = handler
+    }
   }
 
   func serialize(_ data: JsonValue) -> String {

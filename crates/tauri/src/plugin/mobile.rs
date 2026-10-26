@@ -4,7 +4,12 @@
 
 use super::{PluginApi, PluginHandle};
 
-use crate::{AppHandle, Runtime, ipc::Channel};
+#[doc(hidden)]
+pub use crate::ipc::channel::mobile::{release_channel, retain_channel};
+use crate::{
+  AppHandle, Runtime,
+  ipc::channel::mobile::{MobilePayload, get_channel},
+};
 #[cfg(target_os = "android")]
 use crate::{
   runtime::RuntimeHandle,
@@ -32,7 +37,6 @@ type PendingPluginCallHandler = Box<dyn FnOnce(PluginResponse) + Send + 'static>
 static PENDING_PLUGIN_CALLS_ID: AtomicI32 = AtomicI32::new(0);
 static PENDING_PLUGIN_CALLS: OnceLock<Mutex<HashMap<i32, PendingPluginCallHandler>>> =
   OnceLock::new();
-static CHANNELS: OnceLock<Mutex<HashMap<u32, Channel<serde_json::Value>>>> = OnceLock::new();
 
 /// Possible errors when invoking a plugin.
 #[derive(Debug, thiserror::Error)]
@@ -53,14 +57,6 @@ pub enum PluginInvokeError {
   /// Failed to serialize request payload.
   #[error("failed to serialize payload: {0}")]
   CannotSerializePayload(serde_json::Error),
-}
-
-pub(crate) fn register_channel(channel: Channel<serde_json::Value>) {
-  CHANNELS
-    .get_or_init(Default::default)
-    .lock()
-    .unwrap()
-    .insert(channel.id(), channel);
 }
 
 /// Glue between Rust and the Kotlin code that sends the plugin response back.
@@ -118,15 +114,7 @@ pub fn send_channel_data(
   let data: serde_json::Value =
     serde_json::from_str(env.get_string(&data_str).unwrap().to_str().unwrap()).unwrap();
 
-  // Clone the channel out and drop the lock before send(): send() can block
-  // delivering to the webview, and holding CHANNELS across it deadlocks a
-  // concurrent channel registration/send.
-  let channel = CHANNELS
-    .get_or_init(Default::default)
-    .lock()
-    .unwrap()
-    .get(&(channel_id as u32))
-    .cloned();
+  let channel = get_channel(channel_id as u64);
   if let Some(channel) = channel {
     let _ = channel.send(data);
   }
@@ -296,23 +284,14 @@ impl<R: Runtime> PluginHandle<R> {
     payload: impl Serialize,
   ) -> Result<T, PluginInvokeError> {
     let (tx, rx) = oneshot::channel();
-    // the closure is an FnOnce but on Android we need to clone it (error handling)
-    let tx = std::sync::Arc::new(std::sync::Mutex::new(Some(tx)));
     run_command(
       self.name,
       &self.handle,
       command,
-      serde_json::to_value(payload).map_err(PluginInvokeError::CannotSerializePayload)?,
+      MobilePayload::serialize(payload).map_err(PluginInvokeError::CannotSerializePayload)?,
       move |response| {
-        // The receiver is gone when the caller stopped waiting, for example because
-        // the future was dropped by a timeout, and the sender is gone when the
-        // response arrives twice (the Android `run_command` keeps a clone of the
-        // handler for its error path). This closure runs inside the native response
-        // handler, an `extern "C"` / JNI function where a panic cannot unwind and
-        // aborts the process, so a late or duplicate response is dropped instead.
-        if let Some(tx) = tx.lock().unwrap().take() {
-          let _ = tx.send(response);
-        }
+        // A late native response must not panic after the caller cancels its future.
+        let _ = tx.send(response);
       },
     )?;
 
@@ -339,7 +318,7 @@ impl<R: Runtime> PluginHandle<R> {
       self.name,
       &self.handle,
       command,
-      serde_json::to_value(payload).map_err(PluginInvokeError::CannotSerializePayload)?,
+      MobilePayload::serialize(payload).map_err(PluginInvokeError::CannotSerializePayload)?,
       move |response| {
         // Never panic inside the native response handler, see `run_mobile_plugin_async`.
         let _ = tx.send(response);
@@ -363,7 +342,7 @@ pub(crate) fn run_command<R: Runtime, C: AsRef<str>, F: FnOnce(PluginResponse) +
   name: &str,
   _handle: &AppHandle<R>,
   command: C,
-  payload: serde_json::Value,
+  payload: MobilePayload,
   handler: F,
 ) -> Result<(), PluginInvokeError> {
   use std::{
@@ -417,28 +396,35 @@ pub(crate) fn run_command<R: Runtime, C: AsRef<str>, F: FnOnce(PluginResponse) +
         CStr::from_ptr(payload)
       };
 
-      // Clone the channel out and drop the lock before send(): send() can block
-      // delivering to the webview, and holding CHANNELS across it deadlocks a
-      // concurrent channel registration/send.
-      let channel = CHANNELS
-        .get_or_init(Default::default)
-        .lock()
-        .unwrap()
-        .get(&(id as u32))
-        .cloned();
+      let channel = get_channel(id);
       if let Some(channel) = channel {
         let payload: serde_json::Value = serde_json::from_str(payload.to_str().unwrap()).unwrap();
         let _ = channel.send(payload);
       }
     }
 
+    extern "C" fn retain_channel_handler(id: c_ulonglong) {
+      retain_channel(id);
+    }
+
+    extern "C" fn release_channel_handler(id: c_ulonglong) {
+      release_channel(id);
+    }
+
+    let (payload, channels) = payload.register();
     crate::ios::run_plugin_command(
       id,
       &name.into(),
       &command.as_ref().into(),
       &serde_json::to_string(&payload).unwrap().as_str().into(),
+      &serde_json::to_string(&channels.tokens)
+        .unwrap()
+        .as_str()
+        .into(),
       crate::ios::PluginMessageCallback(plugin_command_response_handler),
       crate::ios::ChannelSendDataCallback(send_channel_data_handler),
+      crate::ios::ChannelReleaseCallback(retain_channel_handler),
+      crate::ios::ChannelReleaseCallback(release_channel_handler),
     );
   }
 
@@ -446,15 +432,11 @@ pub(crate) fn run_command<R: Runtime, C: AsRef<str>, F: FnOnce(PluginResponse) +
 }
 
 #[cfg(target_os = "android")]
-pub(crate) fn run_command<
-  R: Runtime,
-  C: AsRef<str>,
-  F: FnOnce(PluginResponse) + Send + Clone + 'static,
->(
+pub(crate) fn run_command<R: Runtime, C: AsRef<str>, F: FnOnce(PluginResponse) + Send + 'static>(
   name: &str,
   handle: &AppHandle<R>,
   command: C,
-  payload: serde_json::Value,
+  payload: MobilePayload,
   handler: F,
 ) -> Result<(), PluginInvokeError> {
   use jni::{JNIEnv, errors::Error as JniError, objects::JObject};
@@ -463,13 +445,15 @@ pub(crate) fn run_command<
     id: i32,
     plugin: &str,
     command: String,
-    payload: &serde_json::Value,
+    payload: MobilePayload,
     env: &mut JNIEnv<'_>,
     activity: &JObject<'_>,
   ) -> Result<(), JniError> {
+    let (payload, channels) = payload.register();
     let plugin = env.new_string(plugin)?;
     let command = env.new_string(&command)?;
-    let data = env.new_string(serde_json::to_string(payload).unwrap())?;
+    let data = env.new_string(serde_json::to_string(&payload).unwrap())?;
+    let channel_tokens = env.new_string(serde_json::to_string(&channels.tokens).unwrap())?;
     let plugin_manager = env
       .call_method(
         activity,
@@ -482,12 +466,13 @@ pub(crate) fn run_command<
     env.call_method(
       plugin_manager,
       "runCommand",
-      "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+      "(ILjava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
       &[
         id.into(),
         (&plugin).into(),
         (&command).into(),
         (&data).into(),
+        (&channel_tokens).into(),
       ],
     )?;
 
@@ -508,11 +493,18 @@ pub(crate) fn run_command<
     .get_or_init(Default::default)
     .lock()
     .unwrap()
-    .insert(id, Box::new(handler.clone()));
+    .insert(id, Box::new(handler));
 
   handle.run_on_android_context(move |env, activity, _webview| {
-    if let Err(e) = run(id, &plugin_name, command, &payload, env, activity) {
-      handler(Err(e.to_string().into()));
+    if let Err(e) = run(id, &plugin_name, command, payload, env, activity) {
+      let handler = PENDING_PLUGIN_CALLS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap()
+        .remove(&id);
+      if let Some(handler) = handler {
+        handler(Err(e.to_string().into()));
+      }
     }
   });
 

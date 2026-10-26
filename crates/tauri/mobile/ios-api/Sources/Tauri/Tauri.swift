@@ -139,8 +139,11 @@ public func runCommand(
   name: SRString,
   command: SRString,
   data: SRString,
+  channels: SRString,
   callback: @escaping @convention(c) (Int, Bool, UnsafePointer<CChar>) -> Void,
-  sendChannelData: @escaping @convention(c) (UInt64, UnsafePointer<CChar>) -> Void
+  sendChannelData: @escaping @convention(c) (UInt64, UnsafePointer<CChar>) -> Void,
+  retainChannel: @escaping @convention(c) (UInt64) -> Void,
+  releaseChannel: @escaping @convention(c) (UInt64) -> Void
 ) {
   let callbackId: UInt64 = 0
   let errorId: UInt64 = 1
@@ -153,5 +156,11 @@ public func runCommand(
     sendChannelData: { (id: UInt64, payload: String) -> Void in
       sendChannelData(id, payload)
     }, data: data.toString())
-  PluginManager.shared.invoke(name: name.toString(), invoke: invoke)
+  do {
+    try invoke.attachChannels(
+      channels.toString(), retain: { retainChannel($0) }, release: { releaseChannel($0) })
+    PluginManager.shared.invoke(name: name.toString(), invoke: invoke)
+  } catch {
+    invoke.reject("\(error)")
+  }
 }

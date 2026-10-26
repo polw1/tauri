@@ -1433,6 +1433,8 @@ pub struct Webview<R: Runtime> {
   pub(crate) manager: Arc<AppManager<R>>,
   pub(crate) app_handle: AppHandle<R>,
   pub(crate) resources_table: Arc<Mutex<ResourceTable>>,
+  #[cfg(any(mobile, test))]
+  pub(crate) channels: crate::ipc::channel::JavaScriptChannels,
   use_https_scheme: bool,
 }
 
@@ -1454,6 +1456,8 @@ impl<R: Runtime> Clone for Webview<R> {
       manager: self.manager.clone(),
       app_handle: self.app_handle.clone(),
       resources_table: self.resources_table.clone(),
+      #[cfg(any(mobile, test))]
+      channels: self.channels.clone(),
       use_https_scheme: self.use_https_scheme,
     }
   }
@@ -1499,6 +1503,8 @@ impl<R: Runtime> Webview<R> {
       window: Arc::new(Mutex::new(window)),
       webview,
       resources_table: Default::default(),
+      #[cfg(any(mobile, test))]
+      channels: Default::default(),
       use_https_scheme,
     }
   }
@@ -2126,22 +2132,10 @@ tauri::Builder::default()
 
       #[cfg(mobile)]
       {
-        fn load_channels<R: Runtime>(payload: &serde_json::Value, webview: &Webview<R>) {
-          use std::str::FromStr;
-
-          if let serde_json::Value::Object(map) = payload {
-            for v in map.values() {
-              if let serde_json::Value::String(s) = v {
-                let _ = crate::ipc::JavaScriptChannelId::from_str(s)
-                  .map(|id| id.channel_on::<R, ()>(webview.clone()));
-              }
-            }
-          }
-        }
-
-        let payload = message.payload.into_json();
-        // initialize channels
-        load_channels(&payload, &message.webview);
+        let payload = crate::ipc::channel::mobile::MobilePayload::from_js(
+          message.payload.into_json(),
+          &message.webview,
+        );
 
         let resolver_ = resolver.clone();
         if let Err(e) = crate::plugin::mobile::run_command(

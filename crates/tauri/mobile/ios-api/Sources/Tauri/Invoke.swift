@@ -12,6 +12,7 @@ import UIKit
   let data: String
   let sendResponse: (UInt64, String?) -> Void
   let sendChannelData: (UInt64, String) -> Void
+  private var channelLifetimes: [UInt64: ChannelLifetime]?
 
   public init(
     command: String, callback: UInt64, error: UInt64,
@@ -24,6 +25,21 @@ import UIKit
     self.data = data
     self.sendResponse = sendResponse
     self.sendChannelData = sendChannelData
+  }
+
+  func attachChannels(
+    _ channels: String, retain: (UInt64) -> Void, release: @escaping (UInt64) -> Void
+  ) throws {
+    let metadata = try JSONDecoder().decode([String: UInt64].self, from: Data(channels.utf8))
+    let tokens = try metadata.map { key, token -> (UInt64, UInt64) in
+      guard let id = UInt32(key), String(id) == key, token > 0 else {
+        throw DecodingError.dataCorrupted(.init(codingPath: [], debugDescription: "invalid channel metadata"))
+      }
+      return (UInt64(id), token)
+    }
+    channelLifetimes = Dictionary(uniqueKeysWithValues: tokens.map { id, token in
+      (id, ChannelLifetime(token: token, retain: retain, release: release))
+    })
   }
 
   public func getRawArgs() -> String {
@@ -41,6 +57,9 @@ import UIKit
     let jsonData = self.data.data(using: .utf8)!
     let decoder = JSONDecoder()
     decoder.userInfo[channelDataKey] = sendChannelData
+    if let channelLifetimes = channelLifetimes {
+      decoder.userInfo[channelLifetimesKey] = channelLifetimes
+    }
     return try decoder.decode(type, from: jsonData)
   }
 

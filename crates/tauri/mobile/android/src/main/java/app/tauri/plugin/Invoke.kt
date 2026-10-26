@@ -17,6 +17,22 @@ class Invoke(
   private val argsJson: String,
   private val jsonMapper: ObjectMapper
 ) {
+  private var channelLifetimes: Map<Long, ChannelLifetime>? = null
+
+  internal fun attachChannels(channels: String, retain: (Long) -> Unit, release: (Long) -> Unit) {
+    val metadata = jsonMapper.readTree(channels)
+    require(metadata.isObject) { "invalid channel metadata" }
+    val tokens = metadata.fields().asSequence().map { (key, value) ->
+      val id = key.toLongOrNull()
+      require(id != null && id.toString() == key && id in 0..0xFFFF_FFFFL
+        && value.isIntegralNumber && value.canConvertToLong() && value.longValue() > 0) {
+        "invalid channel metadata"
+      }
+      id to value.longValue()
+    }.toList()
+    channelLifetimes = tokens.associate { (id, token) -> id to ChannelLifetime(token, retain, release) }
+  }
+
   fun getRawArgs(): String {
     return argsJson
   }
@@ -26,11 +42,11 @@ class Invoke(
   }
 
   fun<T> parseArgs(cls: Class<T>): T {
-    return jsonMapper.readValue(argsJson, cls)
+    return jsonMapper.readerFor(cls).withAttribute(CHANNEL_LIFETIMES, channelLifetimes).readValue(argsJson)
   }
 
   fun<T> parseArgs(ref: TypeReference<T>): T {
-    return jsonMapper.readValue(argsJson, ref)
+    return jsonMapper.readerFor(ref).withAttribute(CHANNEL_LIFETIMES, channelLifetimes).readValue(argsJson)
   }
 
   fun resolve(data: JSObject?) {

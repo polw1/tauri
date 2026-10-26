@@ -24,6 +24,13 @@ use super::{
   format_callback::format_raw_js,
 };
 
+#[cfg(any(mobile, test))]
+pub(crate) mod mobile;
+
+#[cfg(any(mobile, test))]
+#[derive(Clone, Default)]
+pub(crate) struct JavaScriptChannels(Arc<Mutex<HashMap<u32, std::sync::Weak<ChannelInner>>>>);
+
 pub const IPC_PAYLOAD_PREFIX: &str = "__CHANNEL__:";
 // TODO: Change this to `channel` in v3
 pub const CHANNEL_PLUGIN_NAME: &str = "__TAURI_CHANNEL__";
@@ -218,6 +225,8 @@ struct ChannelInner {
 
 impl Drop for ChannelInner {
   fn drop(&mut self) {
+    #[cfg(any(mobile, test))]
+    mobile::forget_serialized(self);
     if let Some(on_drop) = &self.on_drop {
       on_drop();
     }
@@ -229,6 +238,8 @@ impl<TSend> Serialize for Channel<TSend> {
   where
     S: Serializer,
   {
+    #[cfg(any(mobile, test))]
+    mobile::collect(self);
     serializer.serialize_str(&format!("{IPC_PAYLOAD_PREFIX}{}", self.inner.id))
   }
 }
@@ -274,11 +285,26 @@ impl JavaScriptChannelId {
     let callback_fn = self.0;
     let callback_id = callback_fn.0;
 
+    #[cfg(any(mobile, test))]
+    let channels = webview.channels.clone();
+    #[cfg(any(mobile, test))]
+    let mut channels = channels.0.lock().unwrap();
+    #[cfg(any(mobile, test))]
+    if let Some(inner) = channels
+      .get(&callback_id)
+      .and_then(std::sync::Weak::upgrade)
+    {
+      return Channel {
+        inner,
+        phantom: Default::default(),
+      };
+    }
+
     let counter = Arc::new(AtomicUsize::new(0));
     let counter_clone = counter.clone();
     let webview_clone = webview.clone();
 
-    Channel::new_with_id(
+    let channel = Channel::new_with_id(
       callback_id,
       Box::new(move |body| {
         let current_index = counter.fetch_add(1, Ordering::Relaxed);
@@ -324,13 +350,26 @@ impl JavaScriptChannelId {
         Ok(())
       }),
       Some(Box::new(move || {
+        #[cfg(any(mobile, test))]
+        {
+          let mut channels = webview_clone.channels.0.lock().unwrap();
+          if channels
+            .get(&callback_id)
+            .is_some_and(|channel| channel.strong_count() == 0)
+          {
+            channels.remove(&callback_id);
+          }
+        }
         let current_index = counter_clone.load(Ordering::Relaxed);
         let _ = webview_clone.eval(format_raw_js(
           callback_id,
           format!("{{ end: true, index: {current_index} }}"),
         ));
       })),
-    )
+    );
+    #[cfg(any(mobile, test))]
+    channels.insert(callback_id, Arc::downgrade(&channel.inner));
+    channel
   }
 }
 
@@ -386,23 +425,14 @@ impl<TSend> Channel<TSend> {
   }
 
   fn new_with_id(id: u32, on_message: OnMessageFn, on_drop: OnDropFn) -> Self {
-    #[allow(clippy::let_and_return)]
-    let channel = Self {
+    Self {
       inner: Arc::new(ChannelInner {
         id,
         on_message,
         on_drop,
       }),
       phantom: Default::default(),
-    };
-
-    #[cfg(mobile)]
-    crate::plugin::mobile::register_channel(Channel {
-      inner: channel.inner.clone(),
-      phantom: Default::default(),
-    });
-
-    channel
+    }
   }
 
   // This is used from the IPC handler
@@ -518,6 +548,25 @@ mod tests {
 
   fn json_body(s: &str) -> InvokeResponseBody {
     InvokeResponseBody::Json(s.to_string())
+  }
+
+  #[test]
+  fn overlapping_mobile_channels_share_the_same_inner() {
+    use crate::test::{mock_builder, mock_context, noop_assets};
+    let app = mock_builder().build(mock_context(noop_assets())).unwrap();
+    let open = || {
+      crate::WebviewWindowBuilder::new(&app, "channel-owner", crate::WebviewUrl::default())
+        .build()
+        .unwrap()
+    };
+    let window = open();
+    let id = JavaScriptChannelId::from_str("__CHANNEL__:42").unwrap();
+    let first = id.channel_on::<_, ()>(window.webview.clone());
+    let second = id.channel_on::<_, ()>(window.webview.clone());
+    assert!(Arc::ptr_eq(&first.inner, &second.inner));
+    app.handle().manager.on_window_close("channel-owner");
+    let replacement = id.channel_on::<_, ()>(open().webview.clone());
+    assert!(!Arc::ptr_eq(&first.inner, &replacement.inner));
   }
 
   #[test]

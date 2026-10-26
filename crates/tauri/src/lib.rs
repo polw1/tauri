@@ -164,6 +164,20 @@ macro_rules! android_binding {
       sendChannelData,
       [i64, JString],
     );
+    ::tauri::tao::platform::android::prelude::android_fn!(
+      app_tauri,
+      plugin,
+      PluginManager,
+      retainChannel,
+      [i64],
+    );
+    ::tauri::tao::platform::android::prelude::android_fn!(
+      app_tauri,
+      plugin,
+      PluginManager,
+      releaseChannel,
+      [i64],
+    );
 
     // this function is a glue between PluginManager.kt > handlePluginResponse and Rust
     #[allow(non_snake_case)]
@@ -182,12 +196,25 @@ macro_rules! android_binding {
     pub fn sendChannelData(mut env: JNIEnv, _: JClass, id: i64, data: JString) {
       ::tauri::send_channel_data(&mut env, id, data);
     }
+
+    // this function is a glue between PluginManager.kt > retainChannel and Rust
+    #[allow(non_snake_case)]
+    pub fn retainChannel(_: JNIEnv, _: JClass, id: i64) {
+      ::tauri::retain_channel(id as u64);
+    }
+
+    #[allow(non_snake_case)]
+    pub fn releaseChannel(_: JNIEnv, _: JClass, id: i64) {
+      ::tauri::release_channel(id as u64);
+    }
   };
 }
 
 #[cfg(all(feature = "wry", target_os = "android"))]
 #[doc(hidden)]
-pub use plugin::mobile::{handle_android_plugin_response, send_channel_data};
+pub use plugin::mobile::{
+  handle_android_plugin_response, release_channel, retain_channel, send_channel_data,
+};
 #[cfg(all(feature = "wry", target_os = "android"))]
 #[doc(hidden)]
 pub use tauri_runtime_wry::{tao, wry};
